@@ -13,13 +13,19 @@ import pyrender
 import numpy as np
 import colorsys
 import cv2
-
+import platform
 
 class Renderer(object):
 
     def __init__(self, focal_length=600, img_w=512, img_h=512, faces=None,
                  same_mesh_color=False):
-        os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
+        if platform.system() == 'Linux':  # Linux에서는 EGL 사용 가능
+            os.environ['PYOPENGL_PLATFORM'] = 'egl'
+        elif platform.system() == 'Windows':  # Windows에서는 EGL 설정하지 않음
+            print("EGL is not supported on Windows by default. Using the default platform.")
+        else:
+            print(f"Operating system '{platform.system()}' is not explicitly supported for EGL. Using the default platform.")
         self.renderer = pyrender.OffscreenRenderer(viewport_width=img_w,
                                                    viewport_height=img_h,
                                                    point_size=1.0)

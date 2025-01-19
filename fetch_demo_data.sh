@@ -12,7 +12,7 @@ mkdir -p data/body_models
 wget --post-data "username=$username&password=$password" 'https://download.is.tue.mpg.de/download.php?domain=smplx&sfile=models_smplx_v1_1.zip' -O './data/body_models/smplx.zip' --no-check-certificate --continue
 unzip data/body_models/smplx.zip -d data/body_models/smplx
 
-# # MANO model
+# MANO model
 echo -e "\nYou need to register at https://mano.is.tue.mpg.de"
 read -p "Username (MANO):" username
 read -p "Password (MANO):" password
@@ -22,7 +22,6 @@ password=$(urle $password)
 mkdir -p data/body_models
 wget --post-data "username=$username&password=$password" 'https://download.is.tue.mpg.de/download.php?domain=mano&resume=1&sfile=mano_v1_2.zip' -O './data/body_models/mano.zip' --no-check-certificate --continue
 unzip data/body_models/mano.zip -d data/body_models/mano
-
 
 # BEDLAM checkpoints
 echo -e "\nYou need to register at https://bedlam.is.tue.mpg.de/"

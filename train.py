@@ -17,6 +17,15 @@ from train.utils.train_utils import set_seed, update_hparams
 #from pytorch_lightning.loggers import WandbLogger
 
 sys.path.append('.')
+import platform
+
+# 운영 체제를 확인하고 환경 변수를 설정
+if platform.system() == 'Linux':  # Linux에서는 EGL 사용 가능
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+elif platform.system() == 'Windows':  # Windows에서는 EGL 설정하지 않음
+    print("EGL is not supported on Windows by default. Using the default platform.")
+else:
+    print(f"Operating system '{platform.system()}' is not explicitly supported for EGL. Using the default platform.")
 
 def train(hparams, fast_dev_run=False):
     log_dir = hparams.LOG_DIR

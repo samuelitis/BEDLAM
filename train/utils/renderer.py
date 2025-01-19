@@ -1,8 +1,15 @@
 import os
+import platform
 
 from .vis_utils import draw_skeleton, visualize_heatmaps, visualize_segm_masks
 
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+# 운영 체제를 확인하고 환경 변수를 설정
+if platform.system() == 'Linux':  # Linux에서는 EGL 사용 가능
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+elif platform.system() == 'Windows':  # Windows에서는 EGL 설정하지 않음
+    print("EGL is not supported on Windows by default. Using the default platform.")
+else:
+    print(f"Operating system '{platform.system()}' is not explicitly supported for EGL. Using the default platform.")
 # os.environ['EGL_DEVICE_ID'] = os.environ['GPU_DEVICE_ORDINAL'].split(',')[0] \
 #     if 'GPU_DEVICE_ORDINAL' in os.environ.keys() else '0'
 

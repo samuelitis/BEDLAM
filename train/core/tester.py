@@ -9,7 +9,6 @@ from . import constants
 from multi_person_tracker import MPT
 from torchvision.transforms import Normalize
 from glob import glob
-from train.utils.train_utils import load_pretrained_model
 from train.utils.vibe_image_utils import get_single_image_crop_demo
 
 from .config import update_hparams

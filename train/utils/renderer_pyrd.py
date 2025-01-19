@@ -5,13 +5,19 @@ import pyrender
 import numpy as np
 import colorsys
 import cv2
+import platform
 
+if platform.system() == 'Linux':
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+elif platform.system() == 'Windows':
+    print("EGL is not supported on Windows by default. Using the default platform.")
+else:
+    print(f"Operating system '{platform.system()}' is not explicitly supported for EGL. Using the default platform.")
 
 class Renderer(object):
 
     def __init__(self, focal_length=600, img_w=512, img_h=512, faces=None,
                  same_mesh_color=False):
-        os.environ['PYOPENGL_PLATFORM'] = 'egl'
         self.renderer = pyrender.OffscreenRenderer(viewport_width=img_w,
                                                    viewport_height=img_h,
                                                    point_size=1.0)
@@ -20,7 +26,7 @@ class Renderer(object):
         self.faces = faces
         self.same_mesh_color = same_mesh_color
 
-    def render_front_view(self, verts, bg_img_rgb=None, bg_color=(0, 0, 0, 0)):
+    def render_front_view(self, verts, bg_img_rgb=None, bg_color=(0, 0, 0, 0), im_return=True):
         # Create a scene for each image and render all meshes
         scene = pyrender.Scene(bg_color=bg_color, ambient_light=np.ones(3) * 0)
         # Create camera. Camera will always be at [0,0,0]
@@ -59,13 +65,15 @@ class Renderer(object):
         # Until this is fixed use hack with depth image to get the opacity
         color_rgba, depth_map = self.renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color_rgb = color_rgba[:, :, :3]
-        if bg_img_rgb is None:
-            return color_rgb
+        if im_return:
+            if bg_img_rgb is None:
+                return color_rgb
+            else:
+                mask = depth_map > 0
+                bg_img_rgb[mask] = color_rgb[mask]
+                return bg_img_rgb
         else:
-            mask = depth_map > 0
-            bg_img_rgb[mask] = color_rgb[mask]
-            return bg_img_rgb
-
+            return scene
     def render_side_view(self, verts):
         centroid = verts.mean(axis=(0, 1))  # n*6890*3 -> 3
         # make the centroid at the image center (the X and Y coordinates are zeros)

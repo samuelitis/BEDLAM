@@ -1,36 +1,30 @@
 
 import os
 import cv2
-import torch
-import joblib
+import json
 import tqdm
+import torch
 import numpy as np
-from loguru import logger
-from yolov3.yolo import YOLOv3
-from multi_person_tracker import MPT
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-from torchvision.transforms import Normalize
-from . import constants
 
-import pickle
-from train.utils.geometry import batch_euler2matrix
-from train.utils.train_utils import load_pretrained_model
-from train.utils.vibe_image_utils import get_single_image_crop_demo
+from loguru import logger
 from collections import OrderedDict
-from ..utils.renderer_pyrd import Renderer
-from ..models.hmr import HMR
-from .config import update_hparams, SMPL_MEAN_PARAMS
-from ..utils.renderer_cam import render_image_group
-from ..utils.image_utils import transform, crop_ul_br
+from multi_person_tracker import MPT
+from torchvision.transforms import Normalize
 
-from ..utils.image_utils import transform
+from . import constants
+from .config import update_hparams
+from ..models.hmr import HMR
+from ..utils.image_utils import crop_ul_br
+from ..utils.renderer_pyrd import Renderer
 from ..models.head.smplx_head_cam_full import SMPLXHeadCamFull
 from ..models.hand import Hand
 from ..models.hmrx import HMRX
+
 from kornia.geometry.transform.imgwarp import (
-    warp_perspective, get_perspective_transform, warp_affine
+    get_perspective_transform, warp_affine
 )
+
 SCALE_FACTOR_HAND_BBOX=3.0
 MIN_NUM_FRAMES = 0
 
@@ -57,14 +51,6 @@ class SMPLXTrainer(pl.LightningModule):
                                    hparams=self.hparams)
                     
 def get_bbox_valid(joints, img_height, img_width, rescale):
-    #Get bbox using keypoints
-
-    img_width = img_width.unsqueeze(-1).unsqueeze(-1)
-    img_height = img_height.unsqueeze(-1).unsqueeze(-1)
-    # valid_mask= ((joints[:,:,[0]]>=0) & (joints[:,:,[1]]>=0) & (joints[:,:,[0]]<=img_width) & (joints[:,:,[1]]<img_height))
-    # joints_for_min = joints.masked_fill(valid_mask==0,float('inf'))
-    # joints_for_max = joints.masked_fill(valid_mask==0,-float('inf'))
-
     min_coords, _ = torch.min(joints, dim=1)
     xmin, ymin = min_coords[:, 0], min_coords[:, 1]
     max_coords, _ = torch.max(joints, dim=1)
@@ -112,46 +98,18 @@ def crop_tensor(image, center, bbox_size, crop_size, interpolation = 'bilinear',
     tform = torch.transpose(dst_trans_src, 2, 1)
     return cropped_image, tform
 
-def load_valid(model, pretrained_file, skip_list=None):
-
-    pretrained_dict = torch.load(pretrained_file)['state_dict']
-    pretrained_dict = strip_prefix_if_present(pretrained_dict, prefix='model')
-    pretrained_dict = strip_prefix_if_present(pretrained_dict, prefix='fullbody_model')
-    model_dict = model.state_dict()
-    # 1. filter out unnecessary keys
-    pretrained_dict1 = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-
-    # 2. overwrite entries in the existing state dict
-    model_dict.update(pretrained_dict1)
-    model.load_state_dict(model_dict)
-
-def strip_prefix_if_present(state_dict, prefix):
-    keys = sorted(state_dict.keys())
-    if not any(key.startswith(prefix) for key in keys):
-        return state_dict
-    stripped_state_dict = OrderedDict()
-    for key, value in state_dict.items():
-        stripped_state_dict[key.replace(prefix+'.', '')] = value
-    return stripped_state_dict
-
-
-def j2d_processing(kp, center, scale, img_res):
-    """Process gt 2D keypoints and apply all augmentation transforms."""
-    nparts = kp.shape[0]
-    for i in range(nparts):
-        kp[i,0:2] = transform(kp[i,0:2] + 1, center, scale,
-                                [img_res, img_res])
-    # convert to normalized coordinates
-    kp[:,:-1] = 2. * kp[:,:-1] / img_res - 1.
-    # flip the x coordinates
-
-    kp = kp.astype('float32')
-    return kp
-
 class Tester:
-    def __init__(self, args):
-        self.args = args
-        self.model_cfg = update_hparams(args.cfg)
+    def __init__(self, cfg, ckpt, image_folder, output_folder, tracker_batch_size, detector, yolo_img_size, dataframe_path, data_split):
+        self.cfg = cfg
+        self.ckpt = ckpt
+        self.image_folder = image_folder
+        self.output_folder = output_folder
+        self.tracker_batch_size = tracker_batch_size
+        self.detector = detector
+        self.yolo_img_size = yolo_img_size
+        self.dataframe_path = dataframe_path
+        self.data_split = data_split
+        self.model_cfg = update_hparams(cfg)
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.normalize_img = Normalize(mean=constants.IMG_NORM_MEAN, std=constants.IMG_NORM_STD)
 
@@ -174,46 +132,29 @@ class Tester:
 
     def _load_pretrained_model(self):
         # ========= Load pretrained weights ========= #
-        logger.info(f'Loading pretrained model from {self.args.ckpt}')
-        ckpt = torch.load(self.args.ckpt)['state_dict']
+        logger.info(f'Loading pretrained model from {self.ckpt}')
+        ckpt = torch.load(self.ckpt)['state_dict']
         load_pretrained_model(self.model, ckpt, overwrite_shape_mismatch=True, remove_lightning=True)
-        logger.info(f'Loaded pretrained weights from \"{self.args.ckpt}\"')
+        logger.info(f'Loaded pretrained weights from \"{self.ckpt}\"')
 
     def run_detector(self, all_image_folder):
         # run multi object tracker
         mot = MPT(
             device=self.device,
-            batch_size=self.args.tracker_batch_size,
+            batch_size=self.tracker_batch_size,
             display=False,
-            detector_type=self.args.detector,
+            detector_type=self.detector,
             output_format='dict',
-            yolo_img_size=self.args.yolo_img_size,
+            yolo_img_size=self.yolo_img_size,
         )
         bboxes = []
-        for fold_id, image_folder in enumerate(all_image_folder):
+        for _, image_folder in enumerate(all_image_folder):
             bboxes.append(mot.detect(image_folder))
-
-        # Save bbox files 
-        # for fold_id, image_folder in enumerate(all_image_folder):
-        #     all_bbox = mot.detect(image_folder)
-        #     bboxes.append(all_bbox)
-        #     image_file_names = [
-        #         os.path.join(image_folder, x)
-        #         for x in os.listdir(image_folder)
-        #         if x.endswith('.png') or x.endswith('.jpg') or x.endswith('.jpeg')
-        #     ]
-        #     image_file_names = (sorted(image_file_names))
-        #     out_folder = os.path.join(image_folder, 'bbox')
-        #     os.makedirs(out_folder, exist_ok=True)
-        #     for img_idx, img_fname in (enumerate(image_file_names)):
-        #         out_filename = os.path.join(out_folder, os.path.basename(img_fname)+'.txt')
-        #         np.savetxt(out_filename, all_bbox[img_idx])
 
         return bboxes
 
     @torch.no_grad()
-    def run_on_image_folder(self, all_image_folder, detections, output_folder, visualize_proj=False, save_result=False, eval_dataset=''):
-
+    def run_on_image_folder(self, all_image_folder, detections, output_folder):
         for fold_idx, image_folder in enumerate(all_image_folder):
             image_file_names = [
                 os.path.join(image_folder, x)
@@ -226,10 +167,6 @@ class Tester:
                 dets = detections[fold_idx][img_idx]
                 if len(dets) < 1:
                     continue
-                # Load saved bbox files
-                # dets = np.loadtxt(os.path.join(image_folder, 'bbox',os.path.basename(img_fname)+'.txt'))
-                # if len(dets) < 1:
-                #     continue
 
                 if len(dets.shape)==1:
                     dets = np.expand_dims(dets, 0)
@@ -274,17 +211,33 @@ class Tester:
                 rgb_img_full = rgb_img_full.unsqueeze(0).expand(inp_images.shape[0],-1,-1,-1)
                 right_hand_crop, _ = crop_tensor(rgb_img_full, center_r, scale_r, 224)
                 right_hand_crop = self.normalize_img(right_hand_crop)
+                
                 right_hand_pred = self.model.hand_model(right_hand_crop)
+                
                 #Flip left hand image before feedint to hand network
                 center_l, scale_l = get_bbox_valid(lhand_joints, img_h, img_w, SCALE_FACTOR_HAND_BBOX)
                 left_hand_crop, _ = crop_tensor(rgb_img_full, center_l, scale_l, 224)
                 left_hand_crop = self.normalize_img(left_hand_crop)
                 left_hand_crop = torch.flip(left_hand_crop, [3])
+                
                 left_hand_pred = self.model.hand_model(left_hand_crop)
+
                 #Flip predicted right hand pose to left hand 
                 left_hand_pred['pred_pose'] = left_hand_pred['pred_pose'] * self.flip_vector.unsqueeze(0)
 
-                full_body_pred = self.model.fullbody_model(body_pred['body_feat'], left_hand_pred['hand_feat'], right_hand_pred['hand_feat'], body_pred['pred_pose'], body_pred['pred_shape'], body_pred['pred_cam'],left_hand_pred['pred_pose'], right_hand_pred['pred_pose'],bbox_center, bbox_scale, img_w, img_h)
+                full_body_pred = self.model.fullbody_model(body_pred['body_feat'], 
+                                                           left_hand_pred['hand_feat'], 
+                                                           right_hand_pred['hand_feat'], 
+                                                           body_pred['pred_pose'], 
+                                                           body_pred['pred_shape'], 
+                                                           body_pred['pred_cam'],
+                                                           left_hand_pred['pred_pose'], 
+                                                           right_hand_pred['pred_pose'],
+                                                           bbox_center, 
+                                                           bbox_scale, 
+                                                           img_w, 
+                                                           img_h
+                                                           )
                 
                 cam_intrinsics = torch.eye(3).repeat(batch_size, 1, 1).cuda().float()
                 cam_intrinsics[:, 0, 0]  = focal_length
@@ -292,50 +245,115 @@ class Tester:
                 cam_intrinsics[:, 0, 2] = img_w/2.
                 cam_intrinsics[:, 1, 2] = img_h/2.
 
-                output = self.smpl_cam_head(body_pose=full_body_pred['pred_pose'], lhand_pose = left_hand_pred['pred_pose'][:,1:], rhand_pose=right_hand_pred['pred_pose'][:,1:],
-                            shape=body_pred['pred_shape'], cam=body_pred['pred_cam'], cam_intrinsics=cam_intrinsics, 
-                            bbox_scale=bbox_scale,bbox_center=bbox_center, img_w=img_w, img_h=img_h, normalize_joints2d=False)
+                output = self.smpl_cam_head(body_pose=full_body_pred['pred_pose'], 
+                                            lhand_pose = left_hand_pred['pred_pose'][:,1:], 
+                                            rhand_pose=right_hand_pred['pred_pose'][:,1:],
+                                            shape=body_pred['pred_shape'], 
+                                            cam=body_pred['pred_cam'], 
+                                            cam_intrinsics=cam_intrinsics, 
+                                            bbox_scale=bbox_scale,
+                                            bbox_center=bbox_center, 
+                                            img_w=img_w, 
+                                            img_h=img_h, 
+                                            normalize_joints2d=False)
+
+                f_name = img_fname.split('\\')[-1].split('.')[-2] + '.json'
+                output_file_path = os.path.join(output_folder, f_name)
+                save_output_to_file(output, output_file_path)
 
                 del inp_images
 
-                if save_result:
-                    for out_ind, vertices in enumerate(output['vertices']):
-                        out_dict = {}
-                        out_dict['verts'] = output['vertices'][out_ind].detach().cpu().numpy()
-                        out_dict['joints'] = output['joints2d'][out_ind][:24].detach().cpu().numpy()
-                        out_dict['allSmplJoints3d'] = output['joints3d'][out_ind].detach().cpu().numpy()
-                        if eval_dataset == 'agora':
-                            imgname = os.path.basename(img_fname).replace('.png', '')
-                            pickle.dump(out_dict, open(os.path.join(output_folder, imgname + '_personId_' + str(out_ind) + '.pkl'), 'wb'))
-                        elif eval_dataset == 'bedlam':
-                            imgname = img_fname.split('/')[-4] + '_frameID_' + img_fname.split('/')[-1]
-                            imgname = imgname.replace('.png','')
-                            pickle.dump(out_dict, open(os.path.join(output_folder, imgname + '_personId_' + str(out_ind) + '.pkl'), 'wb'))
+                # ========== render & write ==========
+                img_h, img_w, _ = img.shape
+                focal_length = (img_w * img_w + img_h * img_h) ** 0.5
+
+                vertices = output['vertices'].detach().cpu().numpy()
+                translation = output['pred_cam_t'].detach().cpu().numpy()
+
+                pred_vertices_array = vertices + np.expand_dims(translation, 1)
+                renderer = Renderer(focal_length=focal_length, img_w=img_w, img_h=img_h,
+                                    faces=self.smpl_cam_head.smplx.faces,
+                                    same_mesh_color=False)
+
+                front_view = renderer.render_front_view(pred_vertices_array,
+                                                        # bg_img_rgb=img.copy()
+                                                        )
+                # save rendering results
+                basename = img_fname.split('\\')[-1]
+                filename = basename
+                front_view_path = os.path.join(output_folder, filename)
+                logger.info(f'Writing output files to {output_folder}')
+                cv2.imwrite(front_view_path, front_view[:, :, ::-1])
+
+                renderer.delete()
+    def render(self, x, output_folder, bg=None):
+        img_h, img_w, _ = 256, 256, 3
+        focal_length = (img_w * img_w + img_h * img_h) ** 0.5
+
+        vertices = x['vertices'].detach().cpu().numpy()
+        translation = x['pred_cam_t'].detach().cpu().numpy()
+
+        pred_vertices_array = vertices + np.expand_dims(translation, 1)
+        renderer = Renderer(focal_length=focal_length, img_w=img_w, img_h=img_h,
+                            faces=self.smpl_cam_head.smplx.faces,
+                            same_mesh_color=False)
+
+        front_view = renderer.render_front_view(pred_vertices_array,)
+
+        renderer.delete()
+        return front_view
+
+def load_pretrained_model(model, state_dict, strict=False, overwrite_shape_mismatch=True, remove_lightning=False):
+    if remove_lightning:
+        logger.warning(f'Removing "model." keyword from state_dict keys..')
+        pretrained_keys = state_dict.keys()
+        new_state_dict = OrderedDict()
+        for pk in pretrained_keys:
+            if pk.startswith('model.'):
+                new_state_dict[pk.replace('model.', '')] = state_dict[pk]
+            else:
+                new_state_dict[pk] = state_dict[pk]
+
+        model.load_state_dict(new_state_dict, strict=strict)
+    try:
+        model.load_state_dict(state_dict, strict=strict)
+    except RuntimeError:
+        if overwrite_shape_mismatch:
+            model_state_dict = model.state_dict()
+            pretrained_keys = state_dict.keys()
+            model_keys = model_state_dict.keys()
+
+            updated_pretrained_state_dict = state_dict.copy()
+
+            for pk in pretrained_keys:
+                if pk in model_keys:
+                    if model_state_dict[pk].shape != state_dict[pk].shape:
+                        logger.warning(f'size mismatch for \"{pk}\": copying a param with shape {state_dict[pk].shape} '
+                                       f'from checkpoint, the shape in current model is {model_state_dict[pk].shape}')
+
+                        if pk == 'model.head.fc1.weight':
+                            updated_pretrained_state_dict[pk] = torch.cat(
+                                [state_dict[pk], state_dict[pk][:,-7:]], dim=-1
+                            )
+                            logger.warning(f'Updated \"{pk}\" param to {updated_pretrained_state_dict[pk].shape} ')
+                            continue
                         else:
-                            raise Exception('eval dataset can be either agora or bedlam')
+                            del updated_pretrained_state_dict[pk]
 
-                if visualize_proj:
-                    img_h, img_w, _ = img.shape
-                    focal_length = (img_w * img_w + img_h * img_h) ** 0.5
+            model.load_state_dict(updated_pretrained_state_dict, strict=False)
+        else:
+            raise RuntimeError('there are shape inconsistencies between pretrained ckpt and current ckpt')
+    return model
 
-                    vertices = output['vertices'].detach().cpu().numpy()
-                    translation = output['pred_cam_t'].detach().cpu().numpy()
+def save_output_to_file(output, file_path):
+    output_dict = {key: value.cpu().numpy().tolist() for key, value in output.items()}
+    
+    with open(file_path, 'w') as f:
+        json.dump(output_dict, f, indent=4)
 
-                    pred_vertices_array = vertices + np.expand_dims(translation, 1)
-                    renderer = Renderer(focal_length=focal_length, img_w=img_w, img_h=img_h,
-                                        faces=self.smpl_cam_head.smplx.faces,
-                                        same_mesh_color=False)
-                    front_view = renderer.render_front_view(pred_vertices_array,
-                                                            bg_img_rgb=img.copy())
-
-                    # save rendering results
-                    basename = img_fname.split('/')[-1]
-                    filename = basename + "pred_%s.jpg" % 'bedlam'
-                    filename_orig = basename + "orig_%s.jpg" % 'bedlam'
-                    front_view_path = os.path.join(output_folder, filename)
-                    orig_path = os.path.join(output_folder, filename_orig)
-                    logger.info(f'Writing output files to {output_folder}')
-                    cv2.imwrite(front_view_path, front_view[:, :, ::-1])
-                    cv2.imwrite(orig_path, img[:, :, ::-1])
-
-                    renderer.delete()
+def load_output_from_file(file_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    with open(file_path, 'r') as f:
+        output_dict = json.load(f)
+    
+    output = {key: torch.tensor(value, device=device) for key, value in output_dict.items()}
+    return output

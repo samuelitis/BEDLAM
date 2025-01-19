@@ -5,8 +5,18 @@ from loguru import logger
 from glob import glob
 from train.core.tester import Tester
 
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+import platform
+
+# 운영 체제를 확인하고 환경 변수를 설정
+if platform.system() == 'Linux':  # Linux에서는 EGL 사용 가능
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+elif platform.system() == 'Windows':  # Windows에서는 EGL 설정하지 않음
+    print("EGL is not supported on Windows by default. Using the default platform.")
+else:
+    print(f"Operating system '{platform.system()}' is not explicitly supported for EGL. Using the default platform.")
 sys.path.append('')
+import torch
+print(torch.cuda.is_available())
 
 
 def main(args):

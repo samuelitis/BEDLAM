@@ -1,4 +1,4 @@
-
+from PIL import Image
 import os
 import cv2
 import torch
@@ -122,8 +122,12 @@ class Tester:
                 filename_orig = basename + "orig_%s.jpg" % 'bedlam'
                 front_view_path = os.path.join(output_folder, filename)
                 orig_path = os.path.join(output_folder, filename_orig)
-                cv2.imwrite(front_view_path, front_view[:, :, ::-1])
-                cv2.imwrite(orig_path, img[:, :, ::-1])
+                # cv2.imwrite(front_view_path, front_view[:, :, ::-1])
+                # cv2.imwrite(orig_path, img[:, :, ::-1])
+                image = Image.fromarray((img[:, :, ::-1] * 255).astype(np.uint8))
+                image.save(orig_path)
+                image = Image.fromarray((front_view[:, :, ::-1] * 255).astype(np.uint8))
+                image.save(front_view_path)
                 renderer.delete()
 
     @torch.no_grad()
